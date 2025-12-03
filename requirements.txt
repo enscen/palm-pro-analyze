@@ -1,0 +1,7 @@
+streamlit
+opencv-python
+mediapipe
+pillow
+numpy
+googletrans==4.0.0-rc1
+reportlab
