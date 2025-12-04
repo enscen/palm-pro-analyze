@@ -63,7 +63,7 @@ def get_ui_texts(lang):
         'share_link': 'Copy Link Share',
         'no_history': 'Chưa có lịch sử. Upload ảnh để bắt đầu!',
         'detect_error': 'Không detect bàn tay! Chụp rõ lòng bàn tay hướng lên.',
-        'note': '💡 Note: Trace cong theo chỉ tay (approxPolyDP + landmark filter). Đứt/nhánh detect real. Accuracy ~90% ảnh rõ. Train ML thêm nếu cần.'
+        'note': '💡 Note: Trace cong theo chỉ tay (approxPolyDP + landmark filter relax). Đứt/nhánh detect real. Accuracy ~90% ảnh rõ. Nếu sai, thử ảnh sáng hơn.'
     }
     lang_code = LANGUAGES.get(lang, 'vi')
     translated = {k: translate_text(v, lang_code) for k, v in base_texts.items()}
@@ -86,7 +86,7 @@ def get_palm_roi(image, landmarks, h, w):
     roi = image[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
     return roi, (roi_x_start, roi_y_start, roi_x_end - roi_x_start, roi_y_end - roi_y_start)
 
-# FIX Normalize: Safeguard for empty shape
+# Normalize (giữ nguyên, with safeguard)
 def normalize_palm_size(roi):
     try:
         h, w = roi.shape[:2]
@@ -96,20 +96,19 @@ def normalize_palm_size(roi):
             new_h = int(h * scale)
             roi = cv2.resize(roi, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
         else:
-            # FIX: Dummy shape for empty
             roi = np.zeros((1, 1, 3), dtype=np.uint8)
     except Exception:
         roi = np.zeros((1, 1, 3), dtype=np.uint8)
     return roi
 
-# Tracing (giữ nguyên, with landmark filter)
+# FIX Tracing: Relax dist <0.15, min len 20
 def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, 50, 150)
+    edges = cv2.Canny(blurred, 30, 100)  # FIX: Lower for faint
     skeleton = skeletonize(edges / 255.0) * 255
     skeleton = skeleton.astype(np.uint8)
-    skeleton = remove_small_objects(skeleton, min_size=50)
+    skeleton = remove_small_objects(skeleton, min_size=30)  # Lower noise remove
     
     palm_h, palm_w = roi.shape[:2]
     
@@ -117,7 +116,7 @@ def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
     
     contours = find_contours(skeleton, 0.5)
     for contour in contours:
-        if len(contour) < 30: continue
+        if len(contour) < 20: continue  # FIX: Lower min
         epsilon = 0.02 * len(contour)
         approx_contour = cv2.approxPolyDP(np.array(contour, np.int32), epsilon, True)
         approx_contour = approx_contour.reshape(-1, 2).astype(float)
@@ -147,11 +146,11 @@ def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
         index_dist = math.hypot(start_rel_x - index_base[0], start_rel_y - index_base[1])
         middle_dist = math.hypot(start_rel_x - middle_base[0], start_rel_y - index_base[1])
         
-        if angle > 30 and rel_y > 0.4 and rel_x < 0.4 and thumb_dist < 0.1:
+        if angle > 30 and rel_y > 0.4 and rel_x < 0.4 and thumb_dist < 0.15:  # FIX: Relax 0.15
             life_line.append((length, angle, approx_contour, rel_y, rel_x))
-        elif angle < 25 and rel_y < 0.2 and index_dist < 0.1:
+        elif angle < 25 and rel_y < 0.2 and index_dist < 0.15:  # FIX: Relax
             heart_line.append((length, angle, approx_contour, rel_y, rel_x))
-        elif angle < 35 and 0.3 < rel_y < 0.6 and middle_dist < 0.1:
+        elif angle < 35 and 0.3 < rel_y < 0.6 and middle_dist < 0.15:  # FIX: Relax
             head_line.append((length, angle, approx_contour, rel_y, rel_x))
     
     life_line = sorted(life_line, key=lambda x: x[0], reverse=True)[:2]
@@ -160,6 +159,7 @@ def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
     
     return life_line, heart_line, head_line
 
+# Breaks/Branches (giữ nguyên)
 def detect_breaks_branches(contour, skeleton=None):
     if skeleton is None:
         is_break = len(contour) < 80
@@ -208,16 +208,9 @@ def process_palm(image):
         roi = image
         offset = (0, 0, w, h)
     
-    # FIX: Try-except for normalize
-    try:
-        roi_norm = normalize_palm_size(roi)
-    except Exception as e:
-        roi_norm = roi  # Fallback
-        st.warning(f"Resize error: {e}, using original roi.")
-    
+    roi_norm = normalize_palm_size(roi)
     roi_h_norm, roi_w_norm = roi_norm.shape[:2]
     roi_h_orig, roi_w_orig = roi.shape[:2]
-    # FIX: Safeguard for zero
     roi_w_orig = max(1, roi_w_orig)
     roi_h_orig = max(1, roi_h_orig)
     scale_norm_x = roi_w_norm / roi_w_orig if roi_w_orig > 0 else 1
@@ -233,25 +226,36 @@ def process_palm(image):
     colors = {'life': (0, 255, 0), 'heart': (255, 0, 0), 'head': (0, 0, 255)}
     labels = {'life': 'Sinh Khí', 'heart': 'Tâm Đạo', 'head': 'Trí Tuệ'}
     
-    for line_type, lines_list in [('life', life), ('heart', heart), ('head', head)]:
-        for i, (length, angle, contour, rel_y, rel_x) in enumerate(lines_list):
-            contour_orig = []
-            for pt in contour:
-                x_orig = int(pt[0] * scale) + roi_x_start
-                y_orig = int(pt[1] * scale) + roi_y_start
-                contour_orig.append((int(x_orig), int(y_orig)))
-            pts = np.array(contour_orig, np.int32)
-            cv2.polylines(annotated, [pts], False, colors[line_type], thickness=3)
-            cv2.putText(annotated, f'{labels[line_type]} {i+1} (L={length:.1f}, A={angle:.0f}°)', contour_orig[0], cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[line_type], 2)
-            is_break, num_branches, branches = detect_breaks_branches(contour, roi_norm)
-            if is_break:
-                mid_pt = contour_orig[len(contour_orig)//2]
-                cv2.circle(annotated, mid_pt, 5, (0, 0, 255), -1)
-                cv2.putText(annotated, 'Đứt', mid_pt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-            for b in branches[:3]:
-                bx, by = int(b[0] * scale) + roi_x_start, int(b[1] * scale) + roi_y_start
-                cv2.circle(annotated, (bx, by), 4, (0, 255, 255), -1)
-                cv2.putText(annotated, f'Nhánh {num_branches}', (bx, by-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+    # FIX: Fallback if no lines - draw palm bbox
+    if not life and not heart and not head:
+        # Draw palm bbox light green
+        roi_x_end = roi_x_start + roi_w_orig
+        roi_y_end = roi_y_start + roi_h_orig
+        cv2.rectangle(annotated, (roi_x_start, roi_y_start), (roi_x_end, roi_y_end), (0, 255, 0), 2)
+        cv2.putText(annotated, 'Palm ROI - Lines mờ, thử ảnh sáng', (roi_x_start, roi_y_start - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        life = []  # For score
+        heart = []
+        head = []
+    else:
+        for line_type, lines_list in [('life', life), ('heart', heart), ('head', head)]:
+            for i, (length, angle, contour, rel_y, rel_x) in enumerate(lines_list):
+                contour_orig = []
+                for pt in contour:
+                    x_orig = int(pt[0] * scale) + roi_x_start
+                    y_orig = int(pt[1] * scale) + roi_y_start
+                    contour_orig.append((int(x_orig), int(y_orig)))
+                pts = np.array(contour_orig, np.int32)
+                cv2.polylines(annotated, [pts], False, colors[line_type], thickness=3)
+                cv2.putText(annotated, f'{labels[line_type]} {i+1} (L={length:.1f}, A={angle:.0f}°)', contour_orig[0], cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[line_type], 2)
+                is_break, num_branches, branches = detect_breaks_branches(contour, roi_norm)
+                if is_break:
+                    mid_pt = contour_orig[len(contour_orig)//2]
+                    cv2.circle(annotated, mid_pt, 5, (0, 0, 255), -1)
+                    cv2.putText(annotated, 'Đứt', mid_pt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                for b in branches[:3]:
+                    bx, by = int(b[0] * scale) + roi_x_start, int(b[1] * scale) + roi_y_start
+                    cv2.circle(annotated, (bx, by), 4, (0, 255, 255), -1)
+                    cv2.putText(annotated, f'Nhánh {num_branches}', (bx, by-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
     
     diem_sinh, scar_sinh, branches_sinh = score_line_tracing(life, roi_h_norm, roi_w_norm)
     diem_tam, scar_tam, branches_tam = score_line_tracing(heart, roi_h_norm, roi_w_norm)
@@ -277,7 +281,7 @@ def process_palm(image):
         advice = f"😅 Cần boost, {scar_info}{branch_info}. Massage tay, xem chuyên gia nếu đứt nhiều."
     
     result = f"""
-### PHÂN TÍCH CHI TIẾT (Hand: {handedness}, Trace cong filter landmarks)
+### PHÂN TÍCH CHI TIẾT (Hand: {handedness}, Trace cong filter landmarks relax)
 - **Đường Sinh Khí**: {len(life)} paths, {diem_sinh}/10{scar_info if scar_sinh else ''}{branch_info if branches_sinh > 0 else ''} | Ý nghĩa: Sức khỏe/vitality (cong dài=thọ).
 - **Đường Tâm Đạo**: {len(heart)} paths, {diem_tam}/10{scar_info if scar_tam else ''}{branch_info if branches_tam > 0 else ''} | Ý nghĩa: Tình cảm (cong=lãng mạn).
 - **Đường Trí Tuệ**: {len(head)} paths, {diem_tri}/10{scar_info if scar_tri else ''}{branch_info if branches_tri > 0 else ''} | Ý nghĩa: Trí óc/sự nghiệp (sâu cong=sáng tạo).
@@ -285,7 +289,7 @@ def process_palm(image):
 
 {advice}
 
-💡 Note: Vẽ cong theo chỉ tay (approxPolyDP + landmark filter). Đứt=đỏ, nhánh=vàng. Accuracy ~90% ảnh rõ. Nếu sai, thử ảnh sáng hơn.
+💡 Note: Vẽ cong theo chỉ tay (approxPolyDP + landmark filter relax). Đứt=đỏ, nhánh=vàng. Fallback bbox nếu no lines. Accuracy ~90% ảnh rõ. Nếu sai, thử ảnh sáng hơn.
 """
     return annotated, result
 
