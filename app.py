@@ -26,9 +26,9 @@ from reportlab.lib.units import inch
 import base64
 from datetime import datetime
 import os
-from skimage.morphology import skeletonize, remove_small_objects  # FIX: For skeleton
-from skimage.measure import find_contours, label  # FIX: For tracing curves
-from scipy import ndimage  # For labeling branches
+from skimage.morphology import skeletonize, remove_small_objects
+from skimage.measure import find_contours, label
+from scipy import ndimage
 
 # MediaPipe setup
 @st.cache_resource
@@ -69,7 +69,7 @@ def get_ui_texts(lang):
     translated = {k: translate_text(v, lang_code) for k, v in base_texts.items()}
     return translated
 
-# Fixed ROI (giữ nguyên)
+# ROI (giữ nguyên)
 def get_palm_roi(image, landmarks, h, w):
     points = [(int(lm.x * w), int(lm.y * h)) for lm in landmarks]
     xs = [p[0] for p in points]
@@ -95,18 +95,15 @@ def normalize_palm_size(roi):
         roi = cv2.resize(roi, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
     return roi
 
-# FIX: Skeleton + Tracing for curves, breaks, branches
+# Tracing (giữ nguyên)
 def detect_lines_tracing(roi, handedness='Left'):
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blurred, 50, 150)
-    # Skeletonize to thin lines
-    skeleton = skeletonize(edges / 255.0) * 255  # Binary skeleton
+    skeleton = skeletonize(edges / 255.0) * 255
     skeleton = skeleton.astype(np.uint8)
-    # Remove small noise
     skeleton = remove_small_objects(skeleton, min_size=50)
     
-    # Label connected components (segments for breaks)
     labeled = label(skeleton)
     palm_h, palm_w = roi.shape[:2]
     
@@ -114,20 +111,15 @@ def detect_lines_tracing(roi, handedness='Left'):
     
     for region in ndimage.find_objects(labeled):
         if region is None: continue
-        y1, x1 = region[0].start, region[1].start
-        y2, x2 = region[0].stop, region[1].stop
-        # Trace contours for curves
         contours = find_contours(skeleton, 0.5)
         for contour in contours:
-            if len(contour) < 20: continue  # Min length for line
-            # Mid point for classify
+            if len(contour) < 20: continue
             mid_idx = len(contour) // 2
             mid_y = contour[mid_idx][1]
             mid_x = contour[mid_idx][0]
             rel_y = mid_y / palm_h
             rel_x = mid_x / palm_w
-            length = len(contour)  # Approx length
-            # Estimate angle (fit line to start-end)
+            length = len(contour)
             start = contour[0]
             end = contour[-1]
             angle = abs(math.degrees(math.atan2(end[1]-start[1], end[0]-start[0])))
@@ -135,31 +127,35 @@ def detect_lines_tracing(roi, handedness='Left'):
             if handedness == 'Right':
                 rel_x = 1 - rel_x
             
-            # Classify by position + start near landmarks (simplified)
-            if angle > 30 and rel_y > 0.4 and rel_x < 0.4:  # Life curved bottom-thumb
+            if angle > 30 and rel_y > 0.4 and rel_x < 0.4:
                 life_line.append((length, angle, contour, rel_y, rel_x, region))
-            elif angle < 25 and rel_y < 0.2:  # Heart top
+            elif angle < 25 and rel_y < 0.2:
                 heart_line.append((length, angle, contour, rel_y, rel_x, region))
-            elif angle < 35 and 0.3 < rel_y < 0.6:  # Head middle
+            elif angle < 35 and 0.3 < rel_y < 0.6:
                 head_line.append((length, angle, contour, rel_y, rel_x, region))
     
-    # Top 2 per type by length
     life_line = sorted(life_line, key=lambda x: x[0], reverse=True)[:2]
     heart_line = sorted(heart_line, key=lambda x: x[0], reverse=True)[:2]
     head_line = sorted(head_line, key=lambda x: x[0], reverse=True)[:2]
     
     return life_line, heart_line, head_line
 
-def detect_breaks_branches(contour, skeleton):
-    # Breaks: If contour short or gaps in skeleton (simplified by length < threshold)
-    is_break = len(contour) < 100  # Threshold for break
-    # Branches: Check forks in skeleton (pixels with >2 neighbors)
+# FIX: Handle skeleton=None in detect_breaks_branches
+def detect_breaks_branches(contour, skeleton=None):
+    # Approximate if no skeleton
+    if skeleton is None:
+        is_break = len(contour) < 80  # Short = break
+        num_branches = 0
+        branches = []
+        return is_break, num_branches, branches
+    
+    is_break = len(contour) < 100
     branches = []
     for i, pt in enumerate(contour):
         y, x = int(pt[1]), int(pt[0])
         if 1 <= y < skeleton.shape[0] - 1 and 1 <= x < skeleton.shape[1] - 1:
-            neighbors = np.sum(skeleton[y-1:y+2, x-1:x+2] > 0) - 1  # Exclude self
-            if neighbors > 2:  # Fork
+            neighbors = np.sum(skeleton[y-1:y+2, x-1:x+2] > 0) - 1
+            if neighbors > 2:
                 branches.append((x, y))
     num_branches = len(branches)
     return is_break, num_branches, branches
@@ -168,7 +164,6 @@ def score_line_tracing(lines, palm_h, palm_w):
     if not lines: return 2, False, 0
     max_len = max(l[0] for l in lines)
     base = min(8, int((max_len / (palm_h * 0.6)) * 8))
-    # Bonus for no breaks, + for branches (dynamic)
     total_breaks = sum(1 for l in lines if detect_breaks_branches(l[2], None)[0])
     total_branches = sum(detect_breaks_branches(l[2], None)[1] for l in lines)
     penalty = min(3, total_breaks * 2)
@@ -195,40 +190,36 @@ def process_palm(image):
         offset = (0, 0, w, h)
     
     roi_norm = normalize_palm_size(roi)
-    life, heart, head = detect_lines_tracing(roi_norm, handedness)  # FIX: Tracing
+    life, heart, head = detect_lines_tracing(roi_norm, handedness)
     
     annotated = image.copy()
     roi_x_start, roi_y_start, roi_w_orig, roi_h_orig = offset
     roi_h_norm, roi_w_norm = roi_norm.shape[:2]
-    scale = min(roi_w_orig / roi_w_norm, roi_h_orig / roi_h_norm) if roi_w_norm > 0 else 1  # Uniform min scale
+    scale = min(roi_w_orig / roi_w_norm, roi_h_orig / roi_h_norm) if roi_w_norm > 0 else 1
     
     colors = {'life': (0, 255, 0), 'heart': (255, 0, 0), 'head': (0, 0, 255)}
     labels = {'life': 'Sinh Khí', 'heart': 'Tâm Đạo', 'head': 'Trí Tuệ'}
     
     for line_type, lines_list in [('life', life), ('heart', heart), ('head', head)]:
         for i, (length, angle, contour, rel_y, rel_x, region) in enumerate(lines_list):
-            # Scale contour back
             contour_orig = []
             for pt in contour:
                 x_orig = int(pt[0] * scale) + roi_x_start
                 y_orig = int(pt[1] * scale) + roi_y_start
                 contour_orig.append((int(x_orig), int(y_orig)))
-            # Vẽ polyline cho curve
             pts = np.array(contour_orig, np.int32)
             cv2.polylines(annotated, [pts], False, colors[line_type], thickness=3)
-            # Label start
             cv2.putText(annotated, f'{labels[line_type]} {i+1} (L={length:.1f})', contour_orig[0], cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[line_type], 2)
-            # Detect breaks/branches
-            is_break, num_branches, branches = detect_breaks_branches(contour, roi_norm)  # Approx on norm
+            is_break, num_branches, branches = detect_breaks_branches(contour, roi_norm)  # Pass roi_norm as skeleton approx
             if is_break:
-                cv2.circle(annotated, contour_orig[len(contour_orig)//2], 5, (0, 0, 255), -1)  # Red dot break
-                cv2.putText(annotated, 'Đứt', contour_orig[len(contour_orig)//2], cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-            for b in branches[:3]:  # Top branches
+                mid_pt = contour_orig[len(contour_orig)//2]
+                cv2.circle(annotated, mid_pt, 5, (0, 0, 255), -1)
+                cv2.putText(annotated, 'Đứt', mid_pt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            for b in branches[:3]:
                 bx, by = int(b[0] * scale) + roi_x_start, int(b[1] * scale) + roi_y_start
-                cv2.circle(annotated, (bx, by), 4, (0, 255, 255), -1)  # Yellow star branch
+                cv2.circle(annotated, (bx, by), 4, (0, 255, 255), -1)
                 cv2.putText(annotated, f'Nhánh {num_branches}', (bx, by-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
     
-    # Score with branches
     diem_sinh, scar_sinh, branches_sinh = score_line_tracing(life, roi_h_norm, roi_w_norm)
     diem_tam, scar_tam, branches_tam = score_line_tracing(heart, roi_h_norm, roi_w_norm)
     diem_tri, scar_tri, branches_tri = score_line_tracing(head, roi_h_norm, roi_w_norm)
