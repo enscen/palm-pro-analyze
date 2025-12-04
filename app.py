@@ -209,7 +209,7 @@ def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
     marriage_line = sorted(marriage_line, key=lambda x: x[0], reverse=True)[:3]
     sun_line = sorted(sun_line, key=lambda x: x[0], reverse=True)[:1]
     
-    return life_line, heart_line, head_line, fate_line, health_line, marriage_line, sun_line
+    return life_line, heart_line, head_line, fate_line, health_line, marriage_line, sun_line, skeleton
 
 # Breaks/Branches
 def detect_breaks_branches(contour, skeleton=None):
@@ -262,18 +262,23 @@ def process_palm(image):
     
     roi_norm = normalize_palm_size(roi)
     roi_h_norm, roi_w_norm = roi_norm.shape[:2]
-    roi_h_orig, roi_w_orig = roi.shape[:2]
+    roi_x_start, roi_y_start, roi_w_orig, roi_h_orig = offset
     roi_w_orig = max(1, roi_w_orig)
     roi_h_orig = max(1, roi_h_orig)
-    scale_norm_x = roi_w_norm / roi_w_orig if roi_w_orig > 0 else 1
-    scale_norm_y = roi_h_norm / roi_h_orig if roi_h_orig > 0 else 1
-    landmarks_norm = [(lm.x * roi_w_orig * scale_norm_x / roi_w_norm, lm.y * roi_h_orig * scale_norm_y / roi_h_norm) for lm in landmarks]  # Normalize to [0,1]
     
-    life_line, heart_line, head_line, fate_line, health_line, marriage_line, sun_line = detect_lines_tracing(roi_norm, landmarks_norm, handedness)
+    # Correct landmarks_norm to relative [0,1] in roi
+    landmarks_norm = [
+        (
+            (lm.x * w - roi_x_start) / roi_w_orig,
+            (lm.y * h - roi_y_start) / roi_h_orig
+        ) for lm in landmarks
+    ]
+    
+    life_line, heart_line, head_line, fate_line, health_line, marriage_line, sun_line, skeleton = detect_lines_tracing(roi_norm, landmarks_norm, handedness)
     
     annotated = image.copy()
-    roi_x_start, roi_y_start, roi_w_orig, roi_h_orig = offset
-    scale = min(roi_w_orig / roi_w_norm, roi_h_orig / roi_h_norm) if roi_w_norm > 0 else 1
+    scale_x = roi_w_orig / roi_w_norm if roi_w_norm > 0 else 1
+    scale_y = roi_h_orig / roi_h_norm if roi_h_norm > 0 else 1
     
     colors = {'life': (0, 0, 255), 'heart': (0, 0, 255), 'head': (0, 0, 255), 'fate': (0, 0, 255), 'health': (0, 0, 255), 'marriage': (0, 0, 255), 'sun': (0, 0, 255)}  # Red for all
     labels = {'life': 'Sinh Đạo/Life', 'heart': 'Tâm Đạo/Heart', 'head': 'Trí Đạo/Head', 'fate': 'Mệnh/Fate', 'health': 'Sinh Lục/Health', 'marriage': 'Hôn Nhân/Marriage', 'sun': 'Trí Lục/Sun'}
@@ -289,21 +294,22 @@ def process_palm(image):
             for i, (length, angle, contour, rel_y, rel_x) in enumerate(lines_list):
                 contour_orig = []
                 for pt in contour:
-                    x_orig = int(pt[0] * scale) + roi_x_start
-                    y_orig = int(pt[1] * scale) + roi_y_start
+                    x_orig = int(pt[0] * scale_x) + roi_x_start
+                    y_orig = int(pt[1] * scale_y) + roi_y_start
                     contour_orig.append((x_orig, y_orig))
                 pts = np.array(contour_orig, np.int32)
                 cv2.polylines(annotated, [pts], False, colors[line_type], thickness=3)
                 cv2.putText(annotated, f'{labels[line_type]} {i+1} (L={length:.1f}, A={angle:.0f}°)', contour_orig[0], cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[line_type], 2)
-                is_break, num_branches, branches = detect_breaks_branches(contour, roi_norm)
+                is_break, num_branches, branches = detect_breaks_branches(contour, skeleton)
                 if is_break:
                     mid_pt = contour_orig[len(contour_orig)//2]
                     cv2.circle(annotated, mid_pt, 5, (0, 0, 255), -1)
                     cv2.putText(annotated, 'Đứt', mid_pt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
                 for b in branches[:3]:
-                    bx, by = int(b[0] * scale) + roi_x_start, int(b[1] * scale) + roi_y_start
-                    cv2.circle(annotated, (bx, by), 4, (0, 255, 255), -1)
-                    cv2.putText(annotated, f'Nhánh {num_branches}', (bx, by-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+                    bx = int(b[0] * scale_x) + roi_x_start
+                    by = int(b[1] * scale_y) + roi_y_start
+                    cv2.circle(annotated, (int(bx), int(by)), 4, (0, 255, 255), -1)
+                    cv2.putText(annotated, f'Nhánh {num_branches}', (int(bx), int(by)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
     
     diem_sinh, scar_sinh, branches_sinh = score_line_tracing(life_line, roi_h_norm, roi_w_norm)
     diem_tam, scar_tam, branches_tam = score_line_tracing(heart_line, roi_h_norm, roi_w_norm)
@@ -412,7 +418,8 @@ if st.session_state.history:
                 img_data = base64.b64decode(entry['annotated_b64'].split(',')[1])
                 st.download_button("📥 Img", img_data, f"palm_img_{entry['id']}.png")
             with col3:
-                create_pdf(cv2.imread(io.BytesIO(img_data)), entry['result'], f"palm_pdf_{entry['id']}.pdf")  # Note: This may need adjustment for image loading
+                img_array = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
+                create_pdf(img_array, entry['result'], f"palm_pdf_{entry['id']}.pdf")
             with col4:
                 share_link = generate_share_link(entry['id'])
                 st.text_input("Share Link", value=share_link, key=f"link_hist_{i}")
