@@ -101,22 +101,22 @@ def normalize_palm_size(roi):
         roi = np.zeros((1, 1, 3), dtype=np.uint8)
     return roi
 
-# FIX Tracing: Add Hôn Nhân/Sinh Lục/Trí Lục classify, relax 0.3, min 5
+# FIX Tracing: Fix ~ to abs(diff) < 0.05 for approx
 def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blurred, 15, 70)
     skeleton = skeletonize(edges / 255.0) * 255
     skeleton = skeleton.astype(np.uint8)
-    skeleton = remove_small_objects(skeleton, min_size=5)  # FIX: Lower for small Hôn Nhân
+    skeleton = remove_small_objects(skeleton, min_size=5)
     
     palm_h, palm_w = roi.shape[:2]
     
-    life_line, heart_line, head_line, fate_line, health_line, marriage_line, sun_line = [], [], [], [], [], [], []  # Add all
+    life_line, heart_line, head_line, fate_line, health_line, marriage_line, sun_line = [], [], [], [], [], [], []
     
     contours = find_contours(skeleton, 0.5)
     for contour in contours:
-        if len(contour) < 5: continue  # FIX: Lower for small
+        if len(contour) < 5: continue
         epsilon = 0.02 * len(contour)
         approx_contour = cv2.approxPolyDP(np.array(contour, np.int32), epsilon, True)
         approx_contour = approx_contour.reshape(-1, 2).astype(float)
@@ -141,14 +141,14 @@ def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
         thumb_base = landmarks_norm[4]
         index_base = landmarks_norm[8]
         middle_base = landmarks_norm[12]
-        pinky_base = landmarks_norm[20]  # For marriage/sun
+        pinky_base = landmarks_norm[20]
         
         thumb_dist = math.hypot(start_rel_x - thumb_base[0], start_rel_y - thumb_base[1])
         index_dist = math.hypot(start_rel_x - index_base[0], start_rel_y - index_base[1])
         middle_dist = math.hypot(start_rel_x - middle_base[0], start_rel_y - middle_base[1])
         pinky_dist = math.hypot(start_rel_x - pinky_base[0], start_rel_y - pinky_base[1])
         
-        if angle > 30 and rel_y > 0.4 and rel_x < 0.4 and thumb_dist < 0.3:  # FIX: Relax 0.3
+        if angle > 30 and rel_y > 0.4 and rel_x < 0.4 and thumb_dist < 0.3:
             life_line.append((length, angle, approx_contour, rel_y, rel_x))
         elif angle < 25 and rel_y < 0.2 and index_dist < 0.3:
             heart_line.append((length, angle, approx_contour, rel_y, rel_x))
@@ -158,9 +158,9 @@ def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
             fate_line.append((length, angle, approx_contour, rel_y, rel_x))
         elif angle < 25 and rel_y > 0.6 and rel_x > 0.6:
             health_line.append((length, angle, approx_contour, rel_y, rel_x))
-        elif angle < 30 and rel_y ~ 0.7 and rel_x > 0.8 and pinky_dist < 0.3:  # Hôn Nhân ngang cạnh
+        elif angle < 30 and abs(rel_y - 0.7) < 0.05 and rel_x > 0.8 and pinky_dist < 0.3:  # FIX: ~ to abs(diff) < 0.05
             marriage_line.append((length, angle, approx_contour, rel_y, rel_x))
-        elif angle < 20 and 0.4 < rel_y < 0.8 and rel_x ~ 0.8:  # Trí Lục dọc cạnh
+        elif angle < 20 and 0.4 < rel_y < 0.8 and abs(rel_x - 0.8) < 0.05:  # FIX: ~ to abs for Trí Lục
             sun_line.append((length, angle, approx_contour, rel_y, rel_x))
     
     life_line = sorted(life_line, key=lambda x: x[0], reverse=True)[:2]
@@ -274,7 +274,7 @@ def process_palm(image):
     diem_suc_khoe, scar_suc_khoe, branches_suc_khoe = score_line_tracing(health_line, roi_h_norm, roi_w_norm)
     diem_hon_nhan, scar_hon_nhan, branches_hon_nhan = score_line_tracing(marriage_line, roi_h_norm, roi_w_norm)
     diem_tri_luc, scar_tri_luc, branches_tri_luc = score_line_tracing(sun_line, roi_h_norm, roi_w_norm)
-    tong = diem_sinh + diem_tam + diem_tri + diem_menh + diem_suc_khoe + diem_hon_nhan + diem_tri_luc  # Add all
+    tong = diem_sinh + diem_tam + diem_tri + diem_menh + diem_suc_khoe + diem_hon_nhan + diem_tri_luc
     
     scar_info = ""
     branch_info = ""
@@ -370,36 +370,4 @@ if st.session_state.history:
             with col1: download_text(entry['result'], f"palm_result_{entry['id']}.txt")
             with col2:
                 img_data = base64.b64decode(entry['annotated_b64'].split(',')[1])
-                st.download_button("📥 Img", img_data, f"palm_img_{entry['id']}.png", "image/png")
-            with col3:
-                img_array = cv2.imdecode(np.frombuffer(base64.b64decode(entry['annotated_b64'].split(',')[1]), np.uint8), cv2.IMREAD_COLOR)
-                create_pdf(img_array, entry['result'], f"palm_pdf_{entry['id']}.pdf")
-            with col4:
-                share_link = generate_share_link(entry['id'])
-                st.code(share_link)
-else:
-    st.sidebar.info(ui_texts['no_history'])
-
-st.title(translate_text(ui_texts['title'], lang_code))
-
-uploaded_file = st.file_uploader(translate_text(ui_texts['upload_label'], lang_code), type=['jpg', 'jpeg', 'png'])
-if uploaded_file is not None:
-    image = Image.open(uploaded_file)
-    st.image(image, caption=translate_text(ui_texts['original_caption'], lang_code), use_column_width=True)
-    
-    image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    annotated, raw_result = process_palm(image_cv)
-    
-    annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-    annotated_pil = Image.fromarray(annotated_rgb)
-    translated_result = translate_text(raw_result, lang_code)
-    
-    st.image(annotated_pil, caption=translate_text(ui_texts['annotated_caption'], lang_code), use_column_width=True)
-    st.markdown(translated_result)
-    st.markdown(translate_text(ui_texts['note'], lang_code))
-    
-    # History & share (giữ nguyên)
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    entry_id = base64.b64encode(os.urandom(8)).decode()
-    _, annotated_b64 = cv2.imencode('.png', annotated_rgb)
-    b64_str
+                st.download_button("📥 Img", img_data, f"palm_img
