@@ -63,7 +63,7 @@ def get_ui_texts(lang):
         'share_link': 'Copy Link Share',
         'no_history': 'Chưa có lịch sử. Upload ảnh để bắt đầu!',
         'detect_error': 'Không detect bàn tay! Chụp rõ lòng bàn tay hướng lên.',
-        'note': '💡 Note: Trace cong theo chỉ tay (approxPolyDP + landmark filter relax). Đứt/nhánh detect real. Accuracy ~90% ảnh rõ. Nếu sai, thử ảnh sáng hơn.'
+        'note': '💡 Note: Trace cong theo chỉ tay (approxPolyDP + landmark filter relax + Hough fallback). Đứt/nhánh detect real. Accuracy ~90% ảnh rõ. Nếu sai, thử ảnh sáng hơn.'
     }
     lang_code = LANGUAGES.get(lang, 'vi')
     translated = {k: translate_text(v, lang_code) for k, v in base_texts.items()}
@@ -86,7 +86,7 @@ def get_palm_roi(image, landmarks, h, w):
     roi = image[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
     return roi, (roi_x_start, roi_y_start, roi_x_end - roi_x_start, roi_y_end - roi_y_start)
 
-# Normalize (giữ nguyên, with safeguard)
+# Normalize (giữ nguyên)
 def normalize_palm_size(roi):
     try:
         h, w = roi.shape[:2]
@@ -101,14 +101,14 @@ def normalize_palm_size(roi):
         roi = np.zeros((1, 1, 3), dtype=np.uint8)
     return roi
 
-# FIX Tracing: Relax dist <0.15, min len 20
+# FIX Tracing: Relax dist <0.2, min len 15, hybrid Hough if no contours
 def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, 30, 100)  # FIX: Lower for faint
+    edges = cv2.Canny(blurred, 20, 80)  # FIX: Lower for faint
     skeleton = skeletonize(edges / 255.0) * 255
     skeleton = skeleton.astype(np.uint8)
-    skeleton = remove_small_objects(skeleton, min_size=30)  # Lower noise remove
+    skeleton = remove_small_objects(skeleton, min_size=20)  # FIX: Lower
     
     palm_h, palm_w = roi.shape[:2]
     
@@ -116,7 +116,7 @@ def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
     
     contours = find_contours(skeleton, 0.5)
     for contour in contours:
-        if len(contour) < 20: continue  # FIX: Lower min
+        if len(contour) < 15: continue  # FIX: Lower
         epsilon = 0.02 * len(contour)
         approx_contour = cv2.approxPolyDP(np.array(contour, np.int32), epsilon, True)
         approx_contour = approx_contour.reshape(-1, 2).astype(float)
@@ -146,12 +146,35 @@ def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
         index_dist = math.hypot(start_rel_x - index_base[0], start_rel_y - index_base[1])
         middle_dist = math.hypot(start_rel_x - middle_base[0], start_rel_y - index_base[1])
         
-        if angle > 30 and rel_y > 0.4 and rel_x < 0.4 and thumb_dist < 0.15:  # FIX: Relax 0.15
+        if angle > 30 and rel_y > 0.4 and rel_x < 0.4 and thumb_dist < 0.2:  # FIX: Relax 0.2
             life_line.append((length, angle, approx_contour, rel_y, rel_x))
-        elif angle < 25 and rel_y < 0.2 and index_dist < 0.15:  # FIX: Relax
+        elif angle < 25 and rel_y < 0.2 and index_dist < 0.2:  # FIX: Relax
             heart_line.append((length, angle, approx_contour, rel_y, rel_x))
-        elif angle < 35 and 0.3 < rel_y < 0.6 and middle_dist < 0.15:  # FIX: Relax
+        elif angle < 35 and 0.3 < rel_y < 0.6 and middle_dist < 0.2:  # FIX: Relax
             head_line.append((length, angle, approx_contour, rel_y, rel_x))
+    
+    # FIX: Hybrid fallback Hough if no contours
+    if not life and not heart and not head:
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=20, minLineLength=15, maxLineGap=30)
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                length = math.hypot(x2 - x1, y2 - y1)
+                angle = abs(math.degrees(math.atan2(y2 - y1, x2 - x1)))
+                mid_y = (y1 + y2) / 2
+                mid_x = (x1 + x2) / 2
+                rel_y = mid_y / palm_h
+                rel_x = mid_x / palm_w
+                if handedness == 'Right':
+                    rel_x = 1 - rel_x
+                # Simple classify fallback
+                if angle > 30 and rel_y > 0.4 and rel_x < 0.4:
+                    life_line.append((length, angle, np.array([[x1,y1], [x2,y2]]), rel_y, rel_x))
+                elif angle < 25 and rel_y < 0.2:
+                    heart_line.append((length, angle, np.array([[x1,y1], [x2,y2]]), rel_y, rel_x))
+                elif angle < 35 and 0.3 < rel_y < 0.6:
+                    head_line.append((length, angle, np.array([[x1,y1], [x2,y2]]), rel_y, rel_x))
+        print(f"Fallback Hough lines: {len(lines) if 'lines' in locals() else 0}")
     
     life_line = sorted(life_line, key=lambda x: x[0], reverse=True)[:2]
     heart_line = sorted(heart_line, key=lambda x: x[0], reverse=True)[:2]
@@ -228,7 +251,6 @@ def process_palm(image):
     
     # FIX: Fallback if no lines - draw palm bbox
     if not life and not heart and not head:
-        # Draw palm bbox light green
         roi_x_end = roi_x_start + roi_w_orig
         roi_y_end = roi_y_start + roi_h_orig
         cv2.rectangle(annotated, (roi_x_start, roi_y_start), (roi_x_end, roi_y_end), (0, 255, 0), 2)
@@ -281,7 +303,7 @@ def process_palm(image):
         advice = f"😅 Cần boost, {scar_info}{branch_info}. Massage tay, xem chuyên gia nếu đứt nhiều."
     
     result = f"""
-### PHÂN TÍCH CHI TIẾT (Hand: {handedness}, Trace cong filter landmarks relax)
+### PHÂN TÍCH CHI TIẾT (Hand: {handedness}, Trace cong filter landmarks relax + Hough fallback)
 - **Đường Sinh Khí**: {len(life)} paths, {diem_sinh}/10{scar_info if scar_sinh else ''}{branch_info if branches_sinh > 0 else ''} | Ý nghĩa: Sức khỏe/vitality (cong dài=thọ).
 - **Đường Tâm Đạo**: {len(heart)} paths, {diem_tam}/10{scar_info if scar_tam else ''}{branch_info if branches_tam > 0 else ''} | Ý nghĩa: Tình cảm (cong=lãng mạn).
 - **Đường Trí Tuệ**: {len(head)} paths, {diem_tri}/10{scar_info if scar_tri else ''}{branch_info if branches_tri > 0 else ''} | Ý nghĩa: Trí óc/sự nghiệp (sâu cong=sáng tạo).
@@ -289,7 +311,7 @@ def process_palm(image):
 
 {advice}
 
-💡 Note: Vẽ cong theo chỉ tay (approxPolyDP + landmark filter relax). Đứt=đỏ, nhánh=vàng. Fallback bbox nếu no lines. Accuracy ~90% ảnh rõ. Nếu sai, thử ảnh sáng hơn.
+💡 Note: Vẽ cong theo chỉ tay (approxPolyDP + landmark filter relax + Hough fallback). Đứt=đỏ, nhánh=vàng. Fallback bbox nếu no lines. Accuracy ~90% ảnh rõ. Nếu sai, thử ảnh sáng hơn.
 """
     return annotated, result
 
