@@ -63,7 +63,7 @@ def get_ui_texts(lang):
         'share_link': 'Copy Link Share',
         'no_history': 'Chưa có lịch sử. Upload ảnh để bắt đầu!',
         'detect_error': 'Không detect bàn tay! Chụp rõ lòng bàn tay hướng lên.',
-        'note': '💡 Note: Trace cong theo chỉ tay (approxPolyDP smooth). Đứt/nhánh detect real. Accuracy ~90% ảnh rõ. Train ML thêm nếu cần.'
+        'note': '💡 Note: Trace cong theo chỉ tay (approxPolyDP + landmark filter). Đứt/nhánh detect real. Accuracy ~90% ảnh rõ. Train ML thêm nếu cần.'
     }
     lang_code = LANGUAGES.get(lang, 'vi')
     translated = {k: translate_text(v, lang_code) for k, v in base_texts.items()}
@@ -86,16 +86,23 @@ def get_palm_roi(image, landmarks, h, w):
     roi = image[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
     return roi, (roi_x_start, roi_y_start, roi_x_end - roi_x_start, roi_y_end - roi_y_start)
 
+# FIX Normalize: Safeguard for empty shape
 def normalize_palm_size(roi):
-    h, w = roi.shape[:2]
-    if max(h, w) > 0:
-        scale = 400 / max(h, w)
-        new_w = int(w * scale)
-        new_h = int(h * scale)
-        roi = cv2.resize(roi, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    try:
+        h, w = roi.shape[:2]
+        if max(h, w) > 0:
+            scale = 400 / max(h, w)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            roi = cv2.resize(roi, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        else:
+            # FIX: Dummy shape for empty
+            roi = np.zeros((1, 1, 3), dtype=np.uint8)
+    except Exception:
+        roi = np.zeros((1, 1, 3), dtype=np.uint8)
     return roi
 
-# FIX Tracing: Filter by start near landmarks
+# Tracing (giữ nguyên, with landmark filter)
 def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -110,8 +117,7 @@ def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
     
     contours = find_contours(skeleton, 0.5)
     for contour in contours:
-        if len(contour) < 30: continue  # Min for real line
-        # Smooth curve
+        if len(contour) < 30: continue
         epsilon = 0.02 * len(contour)
         approx_contour = cv2.approxPolyDP(np.array(contour, np.int32), epsilon, True)
         approx_contour = approx_contour.reshape(-1, 2).astype(float)
@@ -121,7 +127,7 @@ def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
         mid_x = approx_contour[mid_idx][0]
         rel_y = mid_y / palm_h
         rel_x = mid_x / palm_w
-        length = cv2.arcLength(np.array(approx_contour, np.int32), True)  # Arc length for curve
+        length = cv2.arcLength(np.array(approx_contour, np.int32), True)
         start = approx_contour[0]
         end = approx_contour[-1]
         angle = abs(math.degrees(math.atan2(end[1]-start[1], end[0]-start[0])))
@@ -129,24 +135,23 @@ def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
         if handedness == 'Right':
             rel_x = 1 - rel_x
         
-        # FIX: Filter by start near landmarks (lm4 thumb for life, lm8 index for heart, lm12 middle for head)
         start_rel_x = start[0] / palm_w
         start_rel_y = start[1] / palm_h
         if handedness == 'Right':
             start_rel_x = 1 - start_rel_x
-        thumb_base = landmarks_norm[4]  # Thumb base
-        index_base = landmarks_norm[8]  # Index base
-        middle_base = landmarks_norm[12]  # Middle base
+        thumb_base = landmarks_norm[4]
+        index_base = landmarks_norm[8]
+        middle_base = landmarks_norm[12]
         
         thumb_dist = math.hypot(start_rel_x - thumb_base[0], start_rel_y - thumb_base[1])
         index_dist = math.hypot(start_rel_x - index_base[0], start_rel_y - index_base[1])
-        middle_dist = math.hypot(start_rel_x - middle_base[0], start_rel_y - middle_base[1])
+        middle_dist = math.hypot(start_rel_x - middle_base[0], start_rel_y - index_base[1])
         
-        if angle > 30 and rel_y > 0.4 and rel_x < 0.4 and thumb_dist < 0.1:  # Life near thumb
+        if angle > 30 and rel_y > 0.4 and rel_x < 0.4 and thumb_dist < 0.1:
             life_line.append((length, angle, approx_contour, rel_y, rel_x))
-        elif angle < 25 and rel_y < 0.2 and index_dist < 0.1:  # Heart near index
+        elif angle < 25 and rel_y < 0.2 and index_dist < 0.1:
             heart_line.append((length, angle, approx_contour, rel_y, rel_x))
-        elif angle < 35 and 0.3 < rel_y < 0.6 and middle_dist < 0.1:  # Head near middle
+        elif angle < 35 and 0.3 < rel_y < 0.6 and middle_dist < 0.1:
             head_line.append((length, angle, approx_contour, rel_y, rel_x))
     
     life_line = sorted(life_line, key=lambda x: x[0], reverse=True)[:2]
@@ -181,7 +186,7 @@ def score_line_tracing(lines, palm_h, palm_w):
     total_branches = sum(detect_breaks_branches(l[2], None)[1] for l in lines)
     penalty = min(3, total_breaks * 2)
     branch_bonus = min(2, total_branches)
-    curve_bonus = sum(1 for l in lines if l[1] > 40)  # Cong bonus for life-like
+    curve_bonus = sum(1 for l in lines if l[1] > 40)
     score = base + branch_bonus + curve_bonus - penalty
     return max(1, min(10, int(score))), total_breaks > 0, total_branches
 
@@ -203,9 +208,18 @@ def process_palm(image):
         roi = image
         offset = (0, 0, w, h)
     
-    roi_norm = normalize_palm_size(roi)
-    # Normalize landmarks to roi_norm scale
+    # FIX: Try-except for normalize
+    try:
+        roi_norm = normalize_palm_size(roi)
+    except Exception as e:
+        roi_norm = roi  # Fallback
+        st.warning(f"Resize error: {e}, using original roi.")
+    
+    roi_h_norm, roi_w_norm = roi_norm.shape[:2]
     roi_h_orig, roi_w_orig = roi.shape[:2]
+    # FIX: Safeguard for zero
+    roi_w_orig = max(1, roi_w_orig)
+    roi_h_orig = max(1, roi_h_orig)
     scale_norm_x = roi_w_norm / roi_w_orig if roi_w_orig > 0 else 1
     scale_norm_y = roi_h_norm / roi_h_orig if roi_h_orig > 0 else 1
     landmarks_norm = [(lm.x * roi_w_orig * scale_norm_x, lm.y * roi_h_orig * scale_norm_y) for lm in landmarks]
@@ -214,7 +228,6 @@ def process_palm(image):
     
     annotated = image.copy()
     roi_x_start, roi_y_start, roi_w_orig, roi_h_orig = offset
-    roi_h_norm, roi_w_norm = roi_norm.shape[:2]
     scale = min(roi_w_orig / roi_w_norm, roi_h_orig / roi_h_norm) if roi_w_norm > 0 else 1
     
     colors = {'life': (0, 255, 0), 'heart': (255, 0, 0), 'head': (0, 0, 255)}
