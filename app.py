@@ -101,7 +101,7 @@ def normalize_palm_size(roi):
         roi = np.zeros((1, 1, 3), dtype=np.uint8)
     return roi
 
-# FIX Tracing: Fix ~ to abs(diff) < 0.05 for approx
+# Tracing (fix ~ to abs)
 def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -158,9 +158,9 @@ def detect_lines_tracing(roi, landmarks_norm, handedness='Left'):
             fate_line.append((length, angle, approx_contour, rel_y, rel_x))
         elif angle < 25 and rel_y > 0.6 and rel_x > 0.6:
             health_line.append((length, angle, approx_contour, rel_y, rel_x))
-        elif angle < 30 and abs(rel_y - 0.7) < 0.05 and rel_x > 0.8 and pinky_dist < 0.3:  # FIX: ~ to abs(diff) < 0.05
+        elif angle < 30 and abs(rel_y - 0.7) < 0.05 and rel_x > 0.8 and pinky_dist < 0.3:  # FIX: abs for Hôn Nhân
             marriage_line.append((length, angle, approx_contour, rel_y, rel_x))
-        elif angle < 20 and 0.4 < rel_y < 0.8 and abs(rel_x - 0.8) < 0.05:  # FIX: ~ to abs for Trí Lục
+        elif angle < 20 and 0.4 < rel_y < 0.8 and abs(rel_x - 0.8) < 0.05:  # FIX: abs for Trí Lục
             sun_line.append((length, angle, approx_contour, rel_y, rel_x))
     
     life_line = sorted(life_line, key=lambda x: x[0], reverse=True)[:2]
@@ -210,164 +210,4 @@ def process_palm(image):
     results = hands.process(rgb)
     
     if not results.multi_hand_landmarks:
-        return image, "Không detect bàn tay rõ! Điểm mặc định thấp. Chụp ảnh lòng bàn tay mở, sáng sủa hướng lên camera.\n\n### PHÂN TÍCH CHI TIẾT\n- **Detect**: 0 bàn tay.\n- **Đường Sinh Khí**: 0 segs, 1/10 | Ý nghĩa: Sức khỏe.\n- **Đường Tâm Đạo**: 0 segs, 1/10 | Ý nghĩa: Tình cảm.\n- **Đường Trí Tuệ**: 0 segs, 1/10 | Ý nghĩa: Trí óc.\n- **TỔNG**: 3/30\n\n😅 Ảnh không rõ, cần boost. Thử lại với ảnh tốt hơn!"
-    
-    hand_landmarks = results.multi_hand_landmarks[0]
-    landmarks = hand_landmarks.landmark
-    handedness = results.multi_handedness[0].classification[0].label if results.multi_handedness else 'Left'
-    
-    roi, offset = get_palm_roi(image, landmarks, h, w)
-    
-    if roi.size == 0:
-        roi = image
-        offset = (0, 0, w, h)
-    
-    roi_norm = normalize_palm_size(roi)
-    roi_h_norm, roi_w_norm = roi_norm.shape[:2]
-    roi_h_orig, roi_w_orig = roi.shape[:2]
-    roi_w_orig = max(1, roi_w_orig)
-    roi_h_orig = max(1, roi_h_orig)
-    scale_norm_x = roi_w_norm / roi_w_orig if roi_w_orig > 0 else 1
-    scale_norm_y = roi_h_norm / roi_h_orig if roi_h_orig > 0 else 1
-    landmarks_norm = [(lm.x * roi_w_orig * scale_norm_x, lm.y * roi_h_orig * scale_norm_y) for lm in landmarks]
-    
-    life_line, heart_line, head_line, fate_line, health_line, marriage_line, sun_line = detect_lines_tracing(roi_norm, landmarks_norm, handedness)
-    
-    annotated = image.copy()
-    roi_x_start, roi_y_start, roi_w_orig, roi_h_orig = offset
-    scale = min(roi_w_orig / roi_w_norm, roi_h_orig / roi_h_norm) if roi_w_norm > 0 else 1
-    
-    colors = {'life': (0, 0, 255), 'heart': (0, 0, 255), 'head': (0, 0, 255), 'fate': (0, 0, 255), 'health': (0, 0, 255), 'marriage': (0, 0, 255), 'sun': (0, 0, 255)}  # Red for all
-    labels = {'life': 'Sinh Đạo/Life', 'heart': 'Tâm Đạo/Heart', 'head': 'Trí Đạo/Head', 'fate': 'Mệnh/Fate', 'health': 'Sinh Lục/Health', 'marriage': 'Hôn Nhân/Marriage', 'sun': 'Trí Lục/Sun'}
-    
-    # FIX: Fallback if no lines - draw palm bbox
-    if not life_line and not heart_line and not head_line and not fate_line and not health_line and not marriage_line and not sun_line:
-        roi_x_end = roi_x_start + roi_w_orig
-        roi_y_end = roi_y_start + roi_h_orig
-        cv2.rectangle(annotated, (roi_x_start, roi_y_start), (roi_x_end, roi_y_end), (0, 255, 0), 2)
-        cv2.putText(annotated, 'Palm ROI - Lines mờ, thử ảnh sáng', (roi_x_start, roi_y_start - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-    else:
-        for line_type, lines_list in [('life', life_line), ('heart', heart_line), ('head', head_line), ('fate', fate_line), ('health', health_line), ('marriage', marriage_line), ('sun', sun_line)]:
-            for i, (length, angle, contour, rel_y, rel_x) in enumerate(lines_list):
-                contour_orig = []
-                for pt in contour:
-                    x_orig = int(pt[0] * scale) + roi_x_start
-                    y_orig = int(pt[1] * scale) + roi_y_start
-                    contour_orig.append((int(x_orig), int(y_orig)))
-                pts = np.array(contour_orig, np.int32)
-                cv2.polylines(annotated, [pts], False, colors[line_type], thickness=3)
-                cv2.putText(annotated, f'{labels[line_type]} {i+1} (L={length:.1f}, A={angle:.0f}°)', contour_orig[0], cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[line_type], 2)
-                is_break, num_branches, branches = detect_breaks_branches(contour, roi_norm)
-                if is_break:
-                    mid_pt = contour_orig[len(contour_orig)//2]
-                    cv2.circle(annotated, mid_pt, 5, (0, 0, 255), -1)
-                    cv2.putText(annotated, 'Đứt', mid_pt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-                for b in branches[:3]:
-                    bx, by = int(b[0] * scale) + roi_x_start, int(b[1] * scale) + roi_y_start
-                    cv2.circle(annotated, (bx, by), 4, (0, 255, 255), -1)
-                    cv2.putText(annotated, f'Nhánh {num_branches}', (bx, by-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-    
-    diem_sinh, scar_sinh, branches_sinh = score_line_tracing(life_line, roi_h_norm, roi_w_norm)
-    diem_tam, scar_tam, branches_tam = score_line_tracing(heart_line, roi_h_norm, roi_w_norm)
-    diem_tri, scar_tri, branches_tri = score_line_tracing(head_line, roi_h_norm, roi_w_norm)
-    diem_menh, scar_menh, branches_menh = score_line_tracing(fate_line, roi_h_norm, roi_w_norm)
-    diem_suc_khoe, scar_suc_khoe, branches_suc_khoe = score_line_tracing(health_line, roi_h_norm, roi_w_norm)
-    diem_hon_nhan, scar_hon_nhan, branches_hon_nhan = score_line_tracing(marriage_line, roi_h_norm, roi_w_norm)
-    diem_tri_luc, scar_tri_luc, branches_tri_luc = score_line_tracing(sun_line, roi_h_norm, roi_w_norm)
-    tong = diem_sinh + diem_tam + diem_tri + diem_menh + diem_suc_khoe + diem_hon_nhan + diem_tri_luc
-    
-    scar_info = ""
-    branch_info = ""
-    if scar_sinh: scar_info += " (đứt - obstacle sức khỏe)"
-    if branches_sinh > 0: branch_info += f" (nhánh {branches_sinh} - năng lượng dồi dào)"
-    if scar_tam: scar_info += " (đứt - thử thách tình cảm)"
-    if branches_tam > 0: branch_info += f" (nhánh {branches_tam} - cảm xúc đa dạng)"
-    if scar_tri: scar_info += " (đứt - stress sự nghiệp)"
-    if branches_tri > 0: branch_info += f" (nhánh {branches_tri} - sáng tạo cao)"
-    if scar_menh: scar_info += " (đứt - thay đổi mệnh)"
-    if branches_menh > 0: branch_info += f" (nhánh {branches_menh} - cơ hội sự nghiệp)"
-    if scar_suc_khoe: scar_info += " (đứt - vấn đề sức khỏe)"
-    if branches_suc_khoe > 0: branch_info += f" (nhánh {branches_suc_khoe} - phục hồi tốt)"
-    if scar_hon_nhan: scar_info += " (đứt - ly hôn/đơn thân)"
-    if branches_hon_nhan > 0: branch_info += f" (nhánh {branches_hon_nhan} - nhiều mối tình)"
-    if scar_tri_luc: scar_info += " (đứt - thất bại danh vọng)"
-    if branches_tri_luc > 0: branch_info += f" (nhánh {branches_tri_luc} - thành công nghệ thuật)"
-    
-    if tong >= 50:
-        advice = f"🌟 Bàn tay elite! Lines cong liền{branch_info}. Thành công lớn, sống thọ."
-    elif tong >= 35:
-        advice = f"👍 Bàn tay vững chãi! {scar_info}{branch_info}. Cố lên, potential cao."
-    elif tong >= 25:
-        advice = f"🤔 Trung bình, {scar_info}{branch_info}. Cải thiện lối sống để lines rõ hơn."
-    else:
-        advice = f"😅 Cần boost, {scar_info}{branch_info}. Massage tay, xem chuyên gia nếu đứt nhiều."
-    
-    result = f"""
-### PHÂN TÍCH CHI TIẾT (Hand: {handedness}, Trace cong theo diagram chỉ tay)
-- **Đường Sinh Đạo**: {len(life_line)} paths, {diem_sinh}/10{scar_info if scar_sinh else ''}{branch_info if branches_sinh > 0 else ''} | Ý nghĩa: Sức khỏe/vitality (cong dài=thọ).
-- **Đường Tâm Đạo**: {len(heart_line)} paths, {diem_tam}/10{scar_info if scar_tam else ''}{branch_info if branches_tam > 0 else ''} | Ý nghĩa: Tình cảm (cong=lãng mạn).
-- **Đường Trí Đạo**: {len(head_line)} paths, {diem_tri}/10{scar_info if scar_tri else ''}{branch_info if branches_tri > 0 else ''} | Ý nghĩa: Trí óc/sự nghiệp (sâu cong=sáng tạo).
-- **Đường Mệnh**: {len(fate_line)} paths, {diem_menh}/10{scar_info if scar_menh else ''}{branch_info if branches_menh > 0 else ''} | Ý nghĩa: Sự nghiệp (dọc giữa=ổn định).
-- **Đường Sinh Lục**: {len(health_line)} paths, {diem_suc_khoe}/10{scar_info if scar_suc_khoe else ''}{branch_info if branches_suc_khoe > 0 else ''} | Ý nghĩa: Sức khỏe tổng (dọc dưới=khỏe mạnh).
-- **Đường Hôn Nhân**: {len(marriage_line)} paths, {diem_hon_nhan}/10{scar_info if scar_hon_nhan else ''}{branch_info if branches_hon_nhan > 0 else ''} | Ý nghĩa: Tình duyên (ngang cạnh=số hôn nhân).
-- **Đường Trí Lục**: {len(sun_line)} paths, {diem_tri_luc}/10{scar_info if scar_tri_luc else ''}{branch_info if branches_tri_luc > 0 else ''} | Ý nghĩa: Danh vọng (dọc cạnh=thành công).
-- **TỔNG**: {tong}/70
-
-{advice}
-
-💡 Note: Vẽ đỏ cong theo diagram chỉ tay (approxPolyDP + landmark filter + Hough fallback). Đứt=đỏ dot, nhánh=vàng star. Fallback bbox nếu no lines. Accuracy ~90% ảnh rõ. Nếu sai, thử ảnh sáng hơn.
-"""
-    return annotated, result
-
-# Helper functions (giữ nguyên)
-def download_text(content, filename):
-    st.download_button("📥 Tải Text", content, file_name=filename, mime="text/plain")
-
-def download_image(img_array, filename):
-    img_pil = Image.fromarray(cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB))
-    bio = io.BytesIO()
-    img_pil.save(bio, format='PNG')
-    st.download_button("📥 Tải Ảnh", bio.getvalue(), file_name=filename, mime="image/png")
-
-def create_pdf(image_array, result_text, filename):
-    bio = io.BytesIO()
-    doc = SimpleDocTemplate(bio, pagesize=letter)
-    styles = getSampleStyleSheet()
-    story = []
-    story.append(Paragraph("Palm Analysis Report", styles['Title']))
-    story.append(Spacer(1, 12))
-    img_pil = Image.fromarray(cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB))
-    img_buffer = io.BytesIO()
-    img_pil.save(img_buffer, format='PNG')
-    img_buffer.seek(0)
-    img = RLImage(img_buffer, width=4*inch, height=4*inch)
-    story.append(img)
-    story.append(Spacer(1, 12))
-    story.append(Paragraph(result_text.replace('\n', '<br/>'), styles['Normal']))
-    doc.build(story)
-    bio.seek(0)
-    st.download_button("📥 Tải PDF", bio.getvalue(), file_name=filename, mime="application/pdf")
-
-def generate_share_link(entry_id):
-    return f"https://yourapp.streamlit.app/?share={base64.b64encode(entry_id.encode()).decode()}"
-
-# UI (giữ nguyên)
-st.sidebar.title("⚙️ Cài Đặt")
-lang_name = st.sidebar.selectbox("Ngôn Ngữ / Language", options=list(LANGUAGES.keys()), index=list(LANGUAGES.keys()).index('vietnamese') if 'vietnamese' in LANGUAGES else 0)
-lang_code = LANGUAGES.get(lang_name.lower(), 'vi')
-ui_texts = get_ui_texts(lang_name.lower())
-
-if 'history' not in st.session_state:
-    st.session_state.history = []
-
-st.sidebar.subheader(ui_texts['history_title'])
-if st.session_state.history:
-    for i, entry in enumerate(reversed(st.session_state.history)):
-        with st.sidebar.expander(f"Entry {len(st.session_state.history)-i} - {entry['timestamp']}"):
-            st.image(entry['annotated_b64'], caption="Annotated Image")
-            st.text(entry['result'][:200] + "...")
-            col1, col2, col3, col4 = st.columns(4)
-            with col1: download_text(entry['result'], f"palm_result_{entry['id']}.txt")
-            with col2:
-                img_data = base64.b64decode(entry['annotated_b64'].split(',')[1])
-                st.download_button("📥 Img", img_data, f"palm_img
+        return image, "Không detect bàn tay rõ! Điểm mặc định thấp. Chụp ảnh lòng bàn tay mở, sáng sủa hướng lên camera.\n\n### PHÂN TÍCH CHI TIẾT\n- **Detect**: 0 bàn tay.\n- **Đường Sinh Khí**: 0 segs, 1/10 | Ý nghĩa: Sức khỏe.\n- **Đường Tâm Đạo**: 0 segs
