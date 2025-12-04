@@ -1,11 +1,22 @@
 import streamlit as st
-import cv2
+try:
+    import cv2  # Giữ nguyên, headless sẽ handle
+except ImportError as e:
+    st.error(f"CV2 Import Error: {e}. Đảm bảo dùng opencv-python-headless trong requirements.txt.")
+    st.stop()
+
 import mediapipe as mp
 import numpy as np
 import math
 from PIL import Image
 import io
-from googletrans import Translator, LANGUAGES  # pip install googletrans==4.0.0-rc1
+try:
+    from googletrans import Translator, LANGUAGES
+    translator = Translator()
+except ImportError:
+    st.warning("Googletrans not available - fallback to English.")
+    translator = None
+    LANGUAGES = {'english': 'en', 'vietnamese': 'vi'}  # Fallback dict
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet
@@ -14,7 +25,7 @@ import base64
 from datetime import datetime
 import os
 
-# MediaPipe setup (giữ nguyên)
+# MediaPipe setup
 @st.cache_resource
 def load_mediapipe():
     mp_hands = mp.solutions.hands
@@ -24,16 +35,15 @@ def load_mediapipe():
 hands, mp_drawing = load_mediapipe()
 
 # Translate functions
-translator = Translator()
-
 def translate_text(text, target_lang='vi'):
     """Translate text to target lang (dynamic, all langs supported)"""
     try:
-        if target_lang == 'en': return text  # No translate
-        result = translator.translate(text, dest=target_lang)
+        if not translator or target_lang == 'en': return text
+        lang_code = LANGUAGES.get(target_lang, 'vi')
+        result = translator.translate(text, dest=lang_code)
         return result.text
-    except Exception:
-        st.warning("Translate error - fallback to English.")
+    except Exception as e:
+        st.warning(f"Translate error ({e}) - fallback to English.")
         return text
 
 def get_ui_texts(lang):
@@ -56,7 +66,7 @@ def get_ui_texts(lang):
     translated = {k: translate_text(v, lang_code) for k, v in base_texts.items()}
     return translated
 
-# Các functions detect/score giữ nguyên từ code trước (tối ưu)
+# Các functions detect/score giữ nguyên
 def normalize_palm_size(roi):
     h, w = roi.shape[:2]
     if h > 0:
@@ -182,7 +192,7 @@ def process_palm(image):
 """
     return annotated, result
 
-# Helper: Download functions
+# Helper: Download functions (giữ nguyên)
 def download_text(content, filename):
     st.download_button("📥 Tải Text", content, file_name=filename, mime="text/plain")
 
@@ -223,7 +233,7 @@ def generate_share_link(entry_id):
     """Simple base64 link for share (or use st.secrets for full URL)"""
     return f"https://yourapp.streamlit.app/?share={base64.b64encode(entry_id.encode()).decode()}"
 
-# Streamlit UI
+# Streamlit UI (giữ nguyên)
 st.set_page_config(page_title="Palm Analyzer", layout="wide")
 
 # Sidebar: Lang + History
