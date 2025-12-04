@@ -1,7 +1,7 @@
-streamlit
-opencv-python
-mediapipe
-pillow
-numpy
-googletrans==4.0.0-rc1
-reportlab
+streamlit==1.38.0
+opencv-python-headless==4.10.0.84  # KEY FIX: Headless version, no GUI deps
+mediapipe==0.10.14  # Latest stable 2025, compatible headless
+pillow==10.4.0
+numpy==1.26.4
+googletrans==3.1.0a0  # Stable, tránh SSL error
+reportlab==4.2.2
