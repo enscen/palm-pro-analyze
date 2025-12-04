@@ -1,4 +1,6 @@
 import streamlit as st
+st.set_page_config(page_title="Palm Analyzer", layout="wide")  # KEY FIX: Move to TOP, right after imports!
+
 try:
     import cv2  # Giữ nguyên, headless sẽ handle
 except ImportError as e:
@@ -232,9 +234,6 @@ def create_pdf(image_array, result_text, filename):
 def generate_share_link(entry_id):
     """Simple base64 link for share (or use st.secrets for full URL)"""
     return f"https://yourapp.streamlit.app/?share={base64.b64encode(entry_id.encode()).decode()}"
-
-# Streamlit UI (giữ nguyên)
-st.set_page_config(page_title="Palm Analyzer", layout="wide")
 
 # Sidebar: Lang + History
 st.sidebar.title("⚙️ Cài Đặt")
